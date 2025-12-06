@@ -1,0 +1,23 @@
+{
+    "mikrotik_ap": {
+        "ip": "192.168.88.1",
+        "user": "monitor_user",
+        "password": "YOUR_STRONG_PASSWORD"
+    },
+    "data_storage": {
+        "csv_file_path": "coverage_log.csv",
+        "collection_interval_sec": 60
+    },
+    "rigs": [
+        {
+            "rig_id": "Rig_1",
+            "mikrotik_mac": "AA:BB:CC:DD:EE:F1",
+            "sps855_ip": "192.168.88.101"
+        },
+        {
+            "rig_id": "Rig_2",
+            "mikrotik_mac": "AA:BB:CC:DD:EE:F2",
+            "sps855_ip": "192.168.88.102"
+        }
+    ]
+}
