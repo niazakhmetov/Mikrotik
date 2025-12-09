@@ -7,10 +7,11 @@ import json
 import random 
 import sys
 import os
+import sqlite3 # <-- НОВЫЙ ИМПОРТ
 
 # --- Файлы проекта ---
 CONFIG_FILE = 'config.json'
-LOG_DIR = 'logs'
+MIKROTIK_DB = 'mikrotik_log.db' # <-- НОВАЯ КОНСТАНТА БД
 
 # ==============================================================================
 # КОНФИГУРАЦИЯ И ЗАГРУЗКА
@@ -18,7 +19,6 @@ LOG_DIR = 'logs'
 
 def load_config():
     """Загружает конфигурацию из JSON-файла."""
-    # Проверяем наличие config.json в текущей директории
     if not os.path.exists(CONFIG_FILE):
         print(f"Ошибка: Файл конфигурации '{CONFIG_FILE}' не найден.")
         sys.exit(1)
@@ -27,56 +27,45 @@ def load_config():
 
 CONFIG = load_config()
 
-CSV_HEADERS = [
-    "Timestamp",
-    "Rig_ID",
-    "Client_MAC",
-    "Longitude_X",
-    "Latitude_Y",
-    "RSSI",
-    "TxRate",
-    "RxRate"
-]
+# Удаляем CSV_HEADERS, так как структура будет определяться SQL-схемой
 
 def get_rig_info(rig_id):
-    """Находит информацию о буровой установке по её ID."""
-    for rig in CONFIG.get('rigs', []):
+    """Находит информацию о буровой установке по её ID (используем mikrotik_cpelist)."""
+    # Обновляем, чтобы использовать новую структуру: mikrotik_cpelist
+    for rig in CONFIG.get('mikrotik_cpelist', []):
         if rig['rig_id'] == rig_id:
             return rig
     return None
 
-def get_log_file_path(now=None):
-    """
-    Определяет имя лог-файла на основе рабочего дня (с 20:00 до 20:00).
-    Рабочий день датируется днем, на который приходится его окончание (т.е. 20:00).
-    """
-    if now is None:
-        now = datetime.now()
+def initialize_db():
+    """Создает таблицу mikrotik_log, если она не существует."""
+    try:
+        conn = sqlite3.connect(MIKROTIK_DB)
+        cursor = conn.cursor()
         
-    # Если время >= 20:00, данные относятся к завтрашнему рабочему дню (заканчивается завтра в 20:00).
-    if now.hour >= 20:
-        log_date = now.date() + timedelta(days=1)
-    # Если время < 20:00, данные относятся к текущему рабочему дню (заканчивается сегодня в 20:00).
-    else:
-        log_date = now.date()
+        # SQL-схема для хранения логов Mikrotik
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS mikrotik_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                rig_id TEXT NOT NULL,
+                client_mac TEXT NOT NULL,
+                longitude REAL,
+                latitude REAL,
+                rssi INTEGER,
+                tx_rate TEXT,
+                rx_rate TEXT
+            );
+        """)
+        conn.commit()
+        conn.close()
+        print(f"-> Инициализирована база данных: {MIKROTIK_DB}")
+    except Exception as e:
+        print(f"[FATAL] Ошибка инициализации базы данных: {e}")
+        sys.exit(1)
         
-    # Формат пути: logs/coverage_log_YYYY-MM-DD.csv
-    return os.path.join(LOG_DIR, f"coverage_log_{log_date.strftime('%Y-%m-%d')}.csv")
-
-def initialize_csv(file_path):
-    """Проверяет наличие CSV-файла и записывает заголовки, если файл пуст."""
-    # Убеждаемся, что папка logs существует
-    if not os.path.exists(LOG_DIR):
-         os.makedirs(LOG_DIR)
-         
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        with open(file_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(CSV_HEADERS)
-        print(f"-> Создан новый лог-файл: {file_path}")
-
 # ------------------------------------------------------------------------------
-# ФУНКЦИИ СБОРА ДАННЫХ
+# ФУНКЦИИ СБОРА ДАННЫХ (Оставляем без изменений)
 # ------------------------------------------------------------------------------
 
 def get_gps_data_mock(rig_id):
@@ -101,6 +90,7 @@ def get_gps_data_mock(rig_id):
     lon = rig_base_pos[rig_id][0] + offset
     lat = rig_base_pos[rig_id][1] + offset
     
+    # Возвращаем долготу, широту и фиктивный HDOP
     return lon, lat, 1.2 
 
 def get_mikrotik_data(client_mac):
@@ -127,15 +117,17 @@ def get_mikrotik_data(client_mac):
 
         rssi_match = re.search(r'signal-strength=(-?\d+)', output)
         if rssi_match:
+            # RSSI должен быть целым числом
             mikrotik_data["RSSI"] = int(rssi_match.group(1))
 
+        # TxRate и RxRate оставляем в виде строк (например, "54M" или "6.5M")
         tx_rate_match = re.search(r'tx-rate=(\d+\.?\d*Mbps)', output)
         if tx_rate_match:
-            mikrotik_data["TxRate"] = tx_rate_match.group(1).replace("Mbps", "")
-        
+            mikrotik_data["TxRate"] = tx_rate_match.group(1) #.replace("Mbps", "") # Оставим 'Mbps' для строкового хранения
+            
         rx_rate_match = re.search(r'rx-rate=(\d+\.?\d*Mbps)', output)
         if rx_rate_match:
-            mikrotik_data["RxRate"] = rx_rate_match.group(1).replace("Mbps", "")
+            mikrotik_data["RxRate"] = rx_rate_match.group(1) #.replace("Mbps", "")
             
     except paramiko.AuthenticationException:
         print("   [ERROR] Ошибка аутентификации SSH. Проверьте логин/пароль.")
@@ -144,48 +136,61 @@ def get_mikrotik_data(client_mac):
     finally:
         if ssh.get_transport() is not None and ssh.get_transport().is_active():
             ssh.close()
-        
+            
     return mikrotik_data
 
 # ==============================================================================
-# ОСНОВНОЙ ЦИКЛ СБОРА
+# ОСНОВНОЙ ЦИКЛ СБОРА (Обновленная версия)
 # ==============================================================================
+
+def write_to_db(data_row):
+    """Записывает одну строку данных в базу данных SQLite."""
+    conn = None
+    try:
+        conn = sqlite3.connect(MIKROTIK_DB)
+        cursor = conn.cursor()
+        
+        # Используем INSERT INTO с параметрами для безопасности
+        sql = """
+            INSERT INTO mikrotik_log (timestamp, rig_id, client_mac, longitude, latitude, rssi, tx_rate, rx_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        cursor.execute(sql, data_row)
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"   [ERROR] Ошибка записи в БД: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def collect_data_for_rig(rig_id):
     """Основной цикл для ОДНОЙ буровой установки."""
+    
+    # 0. Инициализация БД
+    initialize_db()
+
     rig_info = get_rig_info(rig_id)
     if not rig_info:
-        print(f"[FATAL] Буровая установка с ID '{rig_id}' не найдена в config.json. Выход.")
+        print(f"[FATAL] Буровая установка с ID '{rig_id}' не найдена в config.json (mikrotik_cpelist). Выход.")
         return
 
-    # 1. Определяем путь к лог-файлу для начала работы
-    current_log_file = get_log_file_path()
-    initialize_csv(current_log_file)
-    
     mac_address = rig_info['mikrotik_mac']
     interval_sec = CONFIG["data_storage"]["collection_interval_sec"]
 
-    print(f"--- Мониторинг запущен для {rig_id} ({mac_address}). Лог: {current_log_file} ---")
+    print(f"--- Мониторинг запущен для {rig_id} ({mac_address}). БД: {MIKROTIK_DB} ---")
     
     while True:
         try:
             timestamp = datetime.now()
             
-            # 1. Проверка смены рабочего дня (переход через 20:00)
-            new_log_file = get_log_file_path(timestamp)
-            if new_log_file != current_log_file:
-                 current_log_file = new_log_file
-                 initialize_csv(current_log_file)
-                 print(f"--- Смена рабочего дня. Новый лог: {current_log_file} ---")
-            
-            # 2. Сбор данных Mikrotik
+            # 1. Сбор данных Mikrotik
             mikrotik_metrics = get_mikrotik_data(mac_address)
             
-            # 3. Сбор GPS-данных (мокируем)
+            # 2. Сбор GPS-данных (мокируем)
             lon, lat, hdop = get_gps_data_mock(rig_id)
             
-            # 4. Формирование строки данных
-            row = [
+            # 3. Формирование строки данных для БД
+            data_row = (
                 timestamp.strftime("%Y-%m-%d %H:%M:%S"),
                 rig_id,
                 mac_address,
@@ -194,18 +199,16 @@ def collect_data_for_rig(rig_id):
                 mikrotik_metrics["RSSI"],
                 mikrotik_metrics["TxRate"],
                 mikrotik_metrics["RxRate"]
-            ]
+            )
 
-            # 5. Запись в CSV
-            with open(current_log_file, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(row)
-                
-            print(f"[{timestamp.strftime('%H:%M:%S')}] {rig_id}: RSSI={mikrotik_metrics['RSSI']} dBm")
+            # 4. Запись в SQLite
+            write_to_db(data_row)
+                        
+            print(f"[{timestamp.strftime('%H:%M:%S')}] {rig_id}: RSSI={mikrotik_metrics['RSSI']} dBm. Записано в БД.")
 
         except Exception as e:
             print(f"   [FATAL] Ошибка в цикле сбора для {rig_id}: {e}")
-        
+            
         time.sleep(interval_sec)
 
 if __name__ == "__main__":
