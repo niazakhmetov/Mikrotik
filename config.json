@@ -4,7 +4,7 @@
     // ====================================================================
     "script_collector": {
         "user": "monitor_user",
-        "password": "ВАШ_НАДЕЖНЫЙ_ПАРОЛЬ", // Используйте пароль, который вы установили: 2z6Fmm%6
+        "password": "2z6Fmm%6",
         "api_timeout": 5,
         "collection_interval_sec": 60
     },
