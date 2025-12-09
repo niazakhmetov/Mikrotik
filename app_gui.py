@@ -4,29 +4,38 @@ import subprocess
 import os
 import sys
 import json
+import sqlite3 # Новый импорт для работы с БД
 from datetime import datetime, timedelta
 import pandas as pd
 from PIL import Image, ImageTk
 
-# --- Константы Файлов ---
+# --- Константы Файлов и Баз Данных ---
 CONFIG_FILE = 'config.json'
-COLLECTOR_SCRIPT = 'data_collector.py'
+COLLECTOR_SCRIPT = 'data_collector.py' # Для запуска сбора Mikrotik
 VISUALIZATION_SCRIPT = 'visualization.py'
 LOG_DIR = 'logs'
 HEATMAP_FILE = 'coverage_heatmap.png'
+
+# Константы для SQLite Баз Данных
+RTK_DB = 'rtk_log.db' 
+MIKROTIK_DB = 'mikrotik_log.db' 
 
 # ==============================================================================
 # УТИЛИТЫ ДЛЯ СМЕН И ФАЙЛОВ
 # ==============================================================================
 
 def get_log_file_path(now=None):
-    """Определяет имя лог-файла на основе рабочего дня (с 20:00 до 20:00)."""
+    """Определяет имя лог-файла на основе рабочего дня (с 20:00 до 20:00). 
+    
+    Примечание: Это утилита из старой логики CSV, сохранена для совместимости.
+    """
     if now is None:
         now = datetime.now()
     if now.hour >= 20:
         log_date = now.date() + timedelta(days=1)
     else:
         log_date = now.date()
+    # Возвращаем путь, который использовался в CSV-логике
     return os.path.join(LOG_DIR, f"coverage_log_{log_date.strftime('%Y-%m-%d')}.csv")
 
 def get_shift_period_by_date(log_date_str):
@@ -55,10 +64,10 @@ def get_current_shift_period():
     
     # Уточнение информации о смене (Дневная/Ночная)
     if now.hour >= 8 and now.hour < 20:
-         shift_type = "Дневная"
+        shift_type = "Дневная"
     else:
-         shift_type = "Ночная"
-         
+        shift_type = "Ночная"
+        
     shift_info = f"{shift_type} Смена ({shift_info.split('С ')[-1]})"
     return shift_info, start_time, end_time
 
@@ -70,15 +79,16 @@ def get_current_shift_period():
 class MikrotikMonitorApp:
     def __init__(self, master):
         self.master = master
-        master.title("🛰️ Мониторинг Wi-Fi Карьера (Mikrotik/SPS855) - v2.0")
+        master.title("🛰️ Мониторинг Wi-Fi Карьера (Mikrotik/GPS) - v2.1")
         master.geometry("1000x700")
 
         # --- Хранилище данных ---
         self.config = self._load_config()
         self.rig_processes = {} # {Rig_ID: subprocess.Popen object}
-        self.rig_ids = [rig['rig_id'] for rig in self.config.get('rigs', [])]
+        # ИСПОЛЬЗУЕМ НОВУЮ СТРУКТУРУ JSON: mikrotik_cpelist
+        self.rig_ids = [rig['rig_id'] for rig in self.config.get('mikrotik_cpelist', [])] 
         self.archive_dates = []  
-        self.status_labels = {} # {Rig_ID: tk.Label object} <-- Новый словарь для статусов
+        self.status_labels = {} # {Rig_ID: tk.Label object}
 
         # --- Переменные для динамического управления ---
         self.font_main = ('Arial', 10)
@@ -90,23 +100,21 @@ class MikrotikMonitorApp:
             self.selected_rig_id.set(self.rig_ids[0])
             
         # --- Инициализация интерфейса ---
-        # 1. Загрузка списка дат перед созданием Combobox
         self._get_available_log_dates() 
         
         self._create_top_frame()
-        self._create_status_overview_frame() # <--- НОВЫЙ ВЫЗОВ
+        self._create_status_overview_frame() 
         self._create_notebook()
         
-        # Установка начальной даты и запуск таймера
         self.selected_archive_date.set("Текущий день")
-        self.master.after(1000, self._update_all_dynamic_data) # Обновление каждые 1 секунду
+        self.master.after(1000, self._update_all_dynamic_data)
 
     # ----------------------------------------------------------------------
     # I. ОСНОВНЫЕ МЕТОДЫ И УТИЛИТЫ
     # ----------------------------------------------------------------------
 
     def _load_config(self):
-        """Загружает конфигурацию из JSON-файла."""
+        """Загружает конфигурацию из JSON-файла, используя новую структуру."""
         if not os.path.exists(CONFIG_FILE):
             messagebox.showerror("Ошибка", f"Файл конфигурации '{CONFIG_FILE}' не найден.")
             sys.exit(1)
@@ -131,9 +139,8 @@ class MikrotikMonitorApp:
         self.archive_dates = sorted(list(set(temp_dates)), reverse=True)
         self.archive_dates_list.extend(self.archive_dates)
         
-        # Обновляем значения в Combobox, если он уже создан
         if hasattr(self, 'date_selector'):
-             self.date_selector.config(values=self.archive_dates_list)
+            self.date_selector.config(values=self.archive_dates_list)
 
     # ----------------------------------------------------------------------
     # II. ФОРМИРОВАНИЕ ИНТЕРФЕЙСА
@@ -170,7 +177,6 @@ class MikrotikMonitorApp:
                                             font=('Arial', 10, 'bold'), padx=10, pady=5)
         self.overview_frame.pack(fill='x', padx=20, pady=(0, 10))
         
-        rig_count = len(self.rig_ids)
         cols = 3 # Максимальное количество столбцов
         
         for i, rig_id in enumerate(self.rig_ids):
@@ -199,11 +205,14 @@ class MikrotikMonitorApp:
         self.tab_wifi = ttk.Frame(self.notebook); self.notebook.add(self.tab_wifi, text='📶 Статус Wi-Fi')
         self.tab_map = ttk.Frame(self.notebook); self.notebook.add(self.tab_map, text='🗺️ Тепловая Карта')
         self.tab_gps = ttk.Frame(self.notebook); self.notebook.add(self.tab_gps, text='📍 GPS/Система')
-        
+        # НОВАЯ ВКЛАДКА RTK:
+        self.tab_rtk = ttk.Frame(self.notebook); 
+
         self._setup_control_tab()
         self._setup_wifi_status_tab()
         self._setup_heatmap_tab()
         self._setup_gps_status_tab()
+        self._setup_rtk_status_tab() # !!! НОВЫЙ ВЫЗОВ !!!
 
     def _setup_control_tab(self):
         tk.Label(self.tab_control, text="Управление Сбором Данных", font=self.font_header).pack(pady=10)
@@ -239,10 +248,50 @@ class MikrotikMonitorApp:
 
     def _setup_gps_status_tab(self):
         tk.Label(self.tab_gps, text="Статус GPS и Логи Выбранной Установки", font=self.font_header).pack(pady=10)
-        self.gps_status_frame = tk.LabelFrame(self.tab_gps, text="Статус SPS855", font=self.font_main, padx=10, pady=10); self.gps_status_frame.pack(fill='x', padx=20, pady=5)
+        self.gps_status_frame = tk.LabelFrame(self.tab_gps, text="Статус GPS", font=self.font_main, padx=10, pady=10); self.gps_status_frame.pack(fill='x', padx=20, pady=5)
         self.gps_info_label = tk.Label(self.gps_status_frame, justify=tk.LEFT, text="Статус: Неизвестен\nПоследняя координата: -", font=self.font_main); self.gps_info_label.pack(fill='x')
         tk.Label(self.tab_gps, text=f"Последние 10 записей из лога:", font=self.font_main).pack(pady=(10, 5))
         self.log_text = tk.Text(self.tab_gps, height=15, width=80, state=tk.DISABLED); self.log_text.pack(fill='both', expand=True, padx=20)
+        
+    # --- НОВЫЙ МЕТОД ДЛЯ ВКЛАДКИ RTK ---
+    def _setup_rtk_status_tab(self):
+        """Создает и заполняет вкладку "🛰️ RTK Базовая станция", используя логику чтения из БД."""
+        
+        rtk_frame = self.tab_rtk
+        self.notebook.add(rtk_frame, text="🛰️ RTK Базовая станция") # Добавляем вкладку
+
+        # --- БЛОК ИНФОРМАЦИИ ---
+        base_info = self.config.get('rtk_base_station', {})
+        info_frame = ttk.LabelFrame(rtk_frame, text="Параметры Базовой Станции", padding="10")
+        info_frame.pack(fill="x", padx=5, pady=5)
+        
+        ttk.Label(info_frame, text=f"Имя системы: {base_info.get('name', 'N/A')}").grid(row=0, column=0, sticky="w", padx=10)
+        ttk.Label(info_frame, text=f"IP: {base_info.get('ip', 'N/A')}").grid(row=1, column=0, sticky="w", padx=10)
+        ttk.Label(info_frame, text=f"Порт: {base_info.get('port', 'N/A')}, Формат: {base_info.get('format', 'N/A')}").grid(row=2, column=0, sticky="w", padx=10)
+
+        # --- БЛОК СТАТУСА ---
+        status_frame = ttk.LabelFrame(rtk_frame, text="Текущий Статус Соединения (Читается из БД)", padding="10")
+        status_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Метка для отображения времени последней проверки
+        self.rtk_time_label = ttk.Label(status_frame, text="Последняя проверка: --:--:--", font=("Arial", 10))
+        self.rtk_time_label.pack(pady=5)
+        
+        # Метка для отображения результата (ОК/ОШИБКА)
+        self.rtk_status_label = ttk.Label(status_frame, text="Ожидание данных от сервиса...", font=("Arial", 14, "bold"))
+        self.rtk_status_label.pack(pady=10)
+        
+        # Кнопка запуска проверки (теперь только обновляет вручную)
+        check_button = ttk.Button(
+            status_frame, 
+            text="Обновить Статус (Вручную)", 
+            command=lambda: self.check_and_update_rtk_status()
+        )
+        check_button.pack(pady=10)
+        
+        # Запускаем автоматическое обновление при создании вкладки
+        self.check_and_update_rtk_status()
+
 
     # ----------------------------------------------------------------------
     # III. ЛОГИКА УПРАВЛЕНИЯ И ОБНОВЛЕНИЯ ДАННЫХ
@@ -250,7 +299,7 @@ class MikrotikMonitorApp:
 
     def _on_rig_select(self, event=None):
         self._update_all_dynamic_data()
-    
+        
     def _on_archive_date_select(self, event=None):
         self._get_available_log_dates() 
         self._update_all_dynamic_data()
@@ -261,7 +310,7 @@ class MikrotikMonitorApp:
         
         if not rig_id: return
 
-        # Определяем период и путь к лог-файлу
+        # Определяем период и путь к лог-файлу (для CSV-логики)
         if selected_date_str == "Текущий день":
             shift_info, start_time, end_time = get_current_shift_period()
             log_file_path = get_log_file_path()
@@ -277,13 +326,15 @@ class MikrotikMonitorApp:
         self._update_control_tab(rig_id, is_archive_mode)
         
         # 3. Обновить Статус Мониторинга для всех буровых
-        self._update_status_overview() # <--- НОВЫЙ ВЫЗОВ
+        self._update_status_overview() 
         
-        # 4. Обновить Статус Wi-Fi (Вкладка 2)
+        # 4. Обновить Статус Wi-Fi (Вкладка 2) - ВРЕМЕННО ОСТАВЛЯЕМ НА CSV
         self._update_wifi_status_tab(rig_id, start_time, end_time, log_file_path)
 
-        # 5. Обновить GPS и Логи (Вкладка 4)
+        # 5. Обновить GPS и Логи (Вкладка 4) - ВРЕМЕННО ОСТАВЛЯЕМ НА CSV
         self._update_gps_status_tab(rig_id, log_file_path)
+        
+        # NOTE: RTK обновляется автоматически в методе check_and_update_rtk_status.
         
         self.master.after(1000, self._update_all_dynamic_data) # Повторять обновление
 
@@ -324,10 +375,11 @@ class MikrotikMonitorApp:
             # Если процесс завершился, обновим словарь процессов
             if process and process.poll() is not None:
                 self.rig_processes[rig_id] = None
-            
+                
             label.config(text=status_text, fg=color)
 
     def _update_wifi_status_tab(self, rig_id, start_time, end_time, log_file_path):
+        # NOTE: Эта функция пока остается на старой логике CSV-файлов
         try:
             df = pd.read_csv(log_file_path)
             df['Timestamp'] = pd.to_datetime(df['Timestamp'])
@@ -367,6 +419,7 @@ class MikrotikMonitorApp:
 
 
     def _update_gps_status_tab(self, rig_id, log_file_path):
+        # NOTE: Эта функция пока остается на старой логике CSV-файлов
         try:
             df = pd.read_csv(log_file_path)
             df_rig = df[df['Rig_ID'] == rig_id]
@@ -377,17 +430,19 @@ class MikrotikMonitorApp:
                 return
 
             last_entry = df_rig.iloc[-1]
-            lon = f"{last_entry['Longitude_X']:.5f}"
-            lat = f"{last_entry['Latitude_Y']:.5f}"
+            # Предполагаем, что колонки для GPS-данных существуют
+            lon = f"{last_entry.get('Longitude_X', 0.0):.5f}" 
+            lat = f"{last_entry.get('Latitude_Y', 0.0):.5f}"
             
             last_timestamp = last_entry['Timestamp']
             
+            # Фиктивные данные для примера
             gps_status = "Онлайн (Отлично)" 
             hdop = "1.2"
             
             info = (f"Статус: {gps_status} (Обновлено: {last_timestamp})\n"
-                    f"Последняя координата: Lon {lon}, Lat {lat}\n"
-                    f"Примерная точность (HDOP): {hdop}")
+                            f"Последняя координата: Lon {lon}, Lat {lat}\n"
+                            f"Примерная точность (HDOP): {hdop}")
             self.gps_info_label.config(text=info)
 
             # Обновление лога
@@ -401,6 +456,57 @@ class MikrotikMonitorApp:
         except Exception:
             self.gps_info_label.config(text="Статус: Ошибка обработки лога GPS.")
 
+    # --- МЕТОД МОНИТОРИНГА RTK (ЧТЕНИЕ ИЗ БД) ---
+    def check_and_update_rtk_status(self):
+        """
+        Читает последний статус RTK из базы данных RTK_DB и обновляет метки.
+        Вызывается автоматически.
+        """
+        try:
+            conn = sqlite3.connect(RTK_DB)
+            cursor = conn.cursor()
+            # Выбираем последнюю запись статуса
+            cursor.execute("SELECT timestamp, status, message FROM rtk_status ORDER BY timestamp DESC LIMIT 1")
+            last_entry = cursor.fetchone()
+            conn.close()
+
+            if not last_entry:
+                self.rtk_status_label.config(text="🟡 СТАТУС: Нет данных в БД", foreground="gray")
+                self.rtk_time_label.config(text="Последняя проверка: --:--:--")
+                self.master.after(5000, self.check_and_update_rtk_status)
+                return
+
+            timestamp_str, status, message = last_entry
+            # Форматируем время для отображения
+            last_check_time_str = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S").strftime("%H:%M:%S")
+
+            self.rtk_time_label.config(text=f"Последняя проверка: {last_check_time_str}")
+
+            if status == "OK":
+                self.rtk_status_label.config(
+                    text=f"🟢 СТАТУС: АКТИВЕН\nСообщение: {message}",
+                    foreground="green"
+                )
+            elif status == "WARNING":
+                self.rtk_status_label.config(
+                    text=f"🟡 СТАТУС: ВНИМАНИЕ\nСообщение: {message}",
+                    foreground="orange"
+                )
+            else: # ERROR
+                self.rtk_status_label.config(
+                    text=f"🔴 СТАТУС: ОШИБКА\nСообщение: {message}",
+                    foreground="red"
+                )
+
+        except sqlite3.OperationalError:
+            self.rtk_status_label.config(text=f"🔴 ОШИБКА: Нет доступа к базе {RTK_DB}", foreground="red")
+        except Exception as e:
+            self.rtk_status_label.config(text=f"🔴 ОШИБКА ЧТЕНИЯ: {e}", foreground="red")
+
+        # Планируем повторное чтение статуса каждые 5 секунд
+        self.master.after(5000, self.check_and_update_rtk_status)
+
+
     # ----------------------------------------------------------------------
     # IV. МЕТОДЫ-ДЕЙСТВИЯ (КНОПКИ)
     # ----------------------------------------------------------------------
@@ -410,6 +516,8 @@ class MikrotikMonitorApp:
         if not rig_id: messagebox.showerror("Ошибка", "Выберите буровую установку."); return
 
         try:
+            # Запускаем data_collector.py с аргументом rig_id
+            # NOTE: Мы не запускаем RTK здесь, RTK запускается отдельным сервисом.
             process = subprocess.Popen([sys.executable, COLLECTOR_SCRIPT, rig_id], 
                                        creationflags=subprocess.CREATE_NEW_CONSOLE)
             self.rig_processes[rig_id] = process
@@ -475,6 +583,10 @@ if __name__ == "__main__":
     except ImportError:
         messagebox.showerror("Критическая ошибка", "Не установлены необходимые библиотеки (pandas, Pillow). Выполните 'pip install -r requirements.txt'.")
         sys.exit(1)
+        
+    # Проверка наличия директории для логов
+    if not os.path.exists(LOG_DIR):
+        os.makedirs(LOG_DIR)
         
     root = tk.Tk()
     app = MikrotikMonitorApp(root)
