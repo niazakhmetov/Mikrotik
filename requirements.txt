@@ -2,3 +2,6 @@ pandas
 matplotlib
 paramiko
 Pillow
+pyserial
+socket
+pyrtcm
